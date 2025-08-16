@@ -1,10 +1,8 @@
-# Streamlit • DataForSEO Labs • Intent Planner (Live, credit-friendly)
-# - Seed keyword -> up to N suggestions (default 20)
-# - Metrics: search volume, CPC (USD->GBP), competition
-# - Search Intent (Live) per keyword
-# - Group by intent with CTR/CVR assumptions and blended overview
-# - Uses DataForSEO RestClient (preferred); falls back to minimal client if missing
-# - Password gate + caching to protect secrets and credits
+# DataForSEO Labs — Keyword Ideas + Intent Planner (Live, trial-safe)
+# - Seed keyword -> up to 20 suggestions with volume/CPC/competition
+# - Search Intent (language-only, no location needed)
+# - Group by intent with CTR/CVR assumptions + blended totals
+# - Password gate (session-state) + caching + raw-debug
 
 import os, math
 import requests
@@ -12,84 +10,72 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 
+st.set_page_config(page_title="Labs Keyword Ideas + Intent (Live)", layout="wide")
+st.title("DataForSEO Labs — Keyword Ideas → Intent Planner")
+
 # ----------------------------
-# Password gate (set APP_PASSWORD in secrets)
+# One-time password gate (APP_PASSWORD is YOUR chosen gate code, not the API password)
 # ----------------------------
-def gate():
+if "authed" not in st.session_state:
+    st.session_state.authed = False
+
+if not st.session_state.authed:
     pw = st.text_input("Password", type="password")
-    if pw != st.secrets.get("APP_PASSWORD"):
-        st.info("Enter password to continue.")
-        st.stop()
-
-st.set_page_config(page_title="Labs Intent Planner (Live)", layout="wide")
-st.title("DataForSEO Labs — Intent Planner (Live)")
-
-# Uncomment to enable the gate (recommended for public Streamlit URLs)
-gate()
+    if st.button("Enter"):
+        if pw == st.secrets.get("APP_PASSWORD"):
+            st.session_state.authed = True
+            st.experimental_rerun()
+        else:
+            st.error("Wrong password")
+    st.stop()
 
 # ----------------------------
-# Secrets / credentials
+# Credentials (Streamlit Secrets)
 # ----------------------------
 LOGIN = st.secrets.get("DATAFORSEO_LOGIN", os.getenv("DATAFORSEO_LOGIN", ""))
 PASSWORD = st.secrets.get("DATAFORSEO_PASSWORD", os.getenv("DATAFORSEO_PASSWORD", ""))
 if not (LOGIN and PASSWORD):
-    st.error("Missing DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD in Streamlit Secrets (or env).")
+    st.error("Missing DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD in secrets (or env).")
     st.stop()
 
 # ----------------------------
-# RestClient (as per DataForSEO docs)
+# RestClient (official) or fallback
 # ----------------------------
 try:
-    # Preferred: official client from https://cdn.dataforseo.com/v3/examples/python/python_Client.zip
-    from client import RestClient  # noqa: E402
+    from Client.client import RestClient  # official client you uploaded
 except Exception:
-    # Fallback minimal client so you can run without downloading their zip immediately
-    class RestClient:  # type: ignore
+    class RestClient:
         def __init__(self, login, password, base_url="https://api.dataforseo.com"):
-            self.login = login
-            self.password = password
-            self.base_url = base_url.rstrip("/")
+            self.login, self.password, self.base_url = login, password, base_url.rstrip("/")
         def post(self, path, payload):
             url = f"{self.base_url}{path}"
             r = requests.post(url, auth=(self.login, self.password), json=payload, timeout=60)
-            try:
-                r.raise_for_status()
+            try: r.raise_for_status()
             except requests.HTTPError as e:
-                try:
-                    msg = r.json()
-                except Exception:
-                    msg = r.text[:500]
+                try: msg = r.json()
+                except Exception: msg = r.text[:800]
                 raise RuntimeError(f"POST {path} -> HTTP {r.status_code}: {msg}") from e
             return r.json()
 
 client = RestClient(LOGIN, PASSWORD)
-
 LABS_BASE = "/v3/dataforseo_labs"
 
 # ----------------------------
 # Helpers
 # ----------------------------
-def labs_post(endpoint_path: str, payload: list[dict]) -> dict:
-    """Call a Labs Live endpoint with RestClient; returns JSON."""
-    return client.post(f"{LABS_BASE}{endpoint_path}", payload)
+def labs_post(endpoint: str, payload: list[dict]) -> dict:
+    return client.post(f"{LABS_BASE}{endpoint}", payload)
 
 def extract_items(resp: dict) -> list[dict]:
-    """Flatten Labs response to items list."""
     try:
-        tasks = resp.get("tasks", [])
-        if not tasks:
-            return []
-        result = tasks[0].get("result", [])
-        if not result:
-            return []
-        items = result[0].get("items", [])
-        return items or []
+        tasks = resp.get("tasks") or []
+        result = tasks[0].get("result") or []
+        return result[0].get("items") or []
     except Exception:
         return []
 
 def monthly_avg(monthly_searches: list[dict]) -> float:
-    if not monthly_searches:
-        return float("nan")
+    if not monthly_searches: return float("nan")
     vals = [m.get("search_volume") for m in monthly_searches if isinstance(m, dict)]
     vals = [v for v in vals if isinstance(v, (int, float))]
     return float(np.mean(vals)) if vals else float("nan")
@@ -99,108 +85,104 @@ def safe_avg(series):
     return s.mean() if not s.empty else np.nan
 
 # ----------------------------
-# Sidebar settings
+# Sidebar (trial-safe defaults)
 # ----------------------------
 with st.sidebar:
-    st.header("Settings")
+    st.header("Inputs")
 
-    seed_keyword = st.text_input("Seed keyword", value="sell property fast")
-    # UK default (you can change): 2826 per DataForSEO location codes
-    location_code = st.number_input("location_code (UK=2826)", min_value=1, value=2826, step=1)
-    language_name = st.text_input("language_name", value="English")
+    seed_keyword = st.text_input("Seed keyword", value="remortgage")
+    # For suggestions we’ll use language_code 'en' (safe default).
+    language_code = st.text_input("language_code (e.g., en, fr, de)", value="en")
+    # Location for suggestions is OPTIONAL; many users like to scope to UK by name.
+    use_location_for_suggestions = st.toggle("Use a location for suggestions", value=True,
+        help="Keyword Suggestions accepts location_name or location_code. If off, Labs uses defaults / all locations.")
+    location_name = "United Kingdom"
+    if use_location_for_suggestions:
+        location_name = st.text_input("location_name (optional for Suggestions)", value="United Kingdom")
 
-    # Hard cap to protect trial credits
-    limit = st.slider("Max keyword ideas (protect trial credit)", 5, 20, 20, step=5,
-                      help="Labs returns metrics with suggestions; 20 ideas keeps costs tiny.")
+    limit = st.slider("Max ideas (protect trial balance)", 5, 20, 20, step=5)
 
-    # Currency conversion
     usd_to_gbp = st.number_input("USD→GBP rate", min_value=0.1, max_value=2.0, value=0.78, step=0.01)
 
     st.divider()
     st.caption("CTR/CVR assumptions by intent")
     intents = ["informational", "navigational", "commercial", "transactional"]
-    ctr_defaults = {"informational": 0.02, "navigational": 0.04, "commercial": 0.05, "transactional": 0.06}
-    cvr_defaults = {"informational": 0.01, "navigational": 0.02, "commercial": 0.03, "transactional": 0.08}
+    ctr_defaults = {"informational":0.02, "navigational":0.04, "commercial":0.05, "transactional":0.06}
+    cvr_defaults = {"informational":0.01, "navigational":0.02, "commercial":0.03, "transactional":0.08}
     ctrs, cvrs = {}, {}
     for i in intents:
         c1, c2 = st.columns(2)
         with c1:
-            ctrs[i] = st.number_input(f"{i.title()} CTR", min_value=0.0, max_value=1.0,
-                                      value=ctr_defaults[i], step=0.005, format="%.3f")
+            ctrs[i] = st.number_input(f"{i.title()} CTR", 0.0, 1.0, ctr_defaults[i], 0.005, format="%.3f", key=f"ctr_{i}")
         with c2:
-            cvrs[i] = st.number_input(f"{i.title()} CVR", min_value=0.0, max_value=1.0,
-                                      value=cvr_defaults[i], step=0.005, format="%.3f")
+            cvrs[i] = st.number_input(f"{i.title()} CVR", 0.0, 1.0, cvr_defaults[i], 0.005, format="%.3f", key=f"cvr_{i}")
 
     st.divider()
-    budget = st.number_input("Optional monthly budget (£)", min_value=0.0, value=0.0, step=100.0,
-                             help="If >0, we’ll show a simple budget allocation check.")
+    budget = st.number_input("Optional monthly budget (£)", 0.0, step=100.0, value=0.0)
+    show_raw = st.toggle("Show raw API payloads/responses (debug)", value=False)
 
 # ----------------------------
-# Cached calls (avoid double-billing on reruns)
+# Cached calls (protect credits)
 # ----------------------------
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_keyword_suggestions(seed: str, loc: int, lang: str, limit: int) -> pd.DataFrame:
-    payload = [{
-        "keyword": seed,
-        "location_code": int(loc),
-        "language_name": lang,
+def get_keyword_suggestions(seed: str, lang_code: str, loc_name: str | None, limit: int) -> tuple[pd.DataFrame, dict, dict]:
+    """Labs Keyword Suggestions (Live) — returns df + raw resp + payload."""
+    payload_item = {
+        "keyword": (seed or "").strip(),
         "limit": int(limit),
+        # Prefer language_code; language_name is also OK but not needed if code is set.
+        "language_code": (lang_code or "en").strip(),
         "include_seed_keyword": False,
         "include_serp_info": False,
         "ignore_synonyms": False,
         "include_clickstream_data": False,
         "exact_match": False
-    }]
+    }
+    if loc_name:  # Optional — many like 'United Kingdom'
+        payload_item["location_name"] = loc_name.strip()
+
+    payload = [payload_item]
     resp = labs_post("/google/keyword_suggestions/live", payload)
     items = extract_items(resp)
+
     rows = []
     for it in items:
-        kw = it.get("keyword")
+        kw = (it.get("keyword") or "").strip()
         info = it.get("keyword_info") or {}
         vol = info.get("search_volume")
-        # CPC may be nested dict or number depending on endpoint
+        # CPC may be number or object; treat consistently
         cpc_val = info.get("cpc")
-        if isinstance(cpc_val, dict):
-            cpc_usd = cpc_val.get("usd")
-        else:
-            cpc_usd = cpc_val
+        cpc_usd = cpc_val.get("usd") if isinstance(cpc_val, dict) else cpc_val
         comp = info.get("competition")
         hist = info.get("monthly_searches") or it.get("monthly_searches")
-        avg_month = monthly_avg(hist)
+        avg_m = monthly_avg(hist)
         rows.append({
             "keyword": kw,
-            "search_volume": vol if vol is not None else (avg_month if not math.isnan(avg_month) else None),
+            "search_volume": vol if vol is not None else (avg_m if not math.isnan(avg_m) else None),
             "cpc_usd": cpc_usd,
             "competition": comp
         })
-    df = pd.DataFrame(rows).dropna(subset=["keyword"]).reset_index(drop=True)
-    return df
+
+    df = (pd.DataFrame(rows)
+            .dropna(subset=["keyword"])
+            .assign(keyword=lambda d: d["keyword"].str.strip())
+            .drop_duplicates(subset=["keyword"])
+            .reset_index(drop=True))
+
+    return df, resp, payload_item
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_search_intent(keywords: list[str], loc: int | None, lang_name: str | None, lang_code: str | None = None) -> tuple[pd.DataFrame, dict, dict]:
-    """
-    DataForSEO Labs · Search Intent (Live)
-    - Only requires keywords + (language_name or language_code)
-    - location_code is optional; omit when None
-    Returns: (df, raw_response, payload_used)
-    """
-    # Clean keywords
+def get_search_intent(keywords: list[str], lang_code: str, lang_name: str | None = None) -> tuple[pd.DataFrame, dict, dict]:
+    """Labs Search Intent (Live) — only needs keywords + language_code/name."""
     kws = sorted(list({(k or "").strip() for k in keywords if isinstance(k, str)}))
     if not kws:
-        return pd.DataFrame(columns=["keyword","intent","intent_probability"]), {"note": "no keywords"}, {}
+        return pd.DataFrame(columns=["keyword","intent","intent_probability"]), {"note":"no keywords"}, {}
 
-    # Build payload with only required/valid fields
-    payload_item = {
-        "keywords": kws[:1000]
-    }
-    if lang_code:         # preferred if you have it (e.g., "en")
-        payload_item["language_code"] = lang_code
-    elif lang_name:       # fallback (e.g., "English")
-        payload_item["language_name"] = lang_name.strip()
-
-    if loc:               # include ONLY if provided
-        payload_item["location_code"] = int(loc)
-
+    payload_item = {"keywords": kws[:1000]}
+    if lang_code:
+        payload_item["language_code"] = lang_code.strip()
+    elif lang_name:
+        payload_item["language_name"] = (lang_name or "").strip()
     payload = [payload_item]
 
     resp = labs_post("/google/search_intent/live", payload)
@@ -221,54 +203,61 @@ def get_search_intent(keywords: list[str], loc: int | None, lang_name: str | Non
 # ----------------------------
 # Run
 # ----------------------------
-run = st.button("Fetch ideas & analyse intent")
+if st.button("Fetch ideas & analyse intent"):
+    # 1) Suggestions (limit 20)
+    with st.spinner("Getting keyword suggestions…"):
+        loc_name_for_sug = location_name if use_location_for_suggestions else None
+        df_kw, raw_sug, payload_sug = get_keyword_suggestions(seed_keyword, language_code, loc_name_for_sug, limit)
 
-if run:
-    with st.spinner("Fetching keyword ideas (Live)…"):
-        df_kw = get_keyword_suggestions(seed_keyword.strip(), location_code, language_name, limit)
+    if show_raw:
+        with st.expander("Payload → keyword_suggestions"):
+            st.json(payload_sug)
+        with st.expander("RAW response ← keyword_suggestions"):
+            st.json(raw_sug)
 
     if df_kw.empty:
-        st.warning("No keyword ideas returned. Try another seed or adjust locale.")
+        st.warning("No suggestions returned. Try a simpler seed, increase limit, or remove location.")
         st.stop()
 
-    # Currency conversion
-    if "cpc_usd" in df_kw.columns:
-        df_kw["cpc_gbp"] = (pd.to_numeric(df_kw["cpc_usd"], errors="coerce") * usd_to_gbp).round(2)
-
+    df_kw["cpc_gbp"] = (pd.to_numeric(df_kw["cpc_usd"], errors="coerce") * usd_to_gbp).round(2)
     st.subheader("Keyword ideas with metrics")
     st.dataframe(df_kw, use_container_width=True)
 
-    # Intent classification
-kw_list = df_kw["keyword"].dropna().astype(str).tolist()
+    # 2) Intent (omit location; language-only as required by docs)
+    with st.spinner("Classifying search intent…"):
+        kw_list = df_kw["keyword"].dropna().astype(str).tolist()
+        df_intent, raw_int, payload_int = get_search_intent(kw_list, language_code, lang_name="English")
 
-# Pass None for loc if you want to omit it
-use_loc_for_intent = False  # or drive this from a sidebar toggle
-loc_for_intent = location_code if use_loc_for_intent else None
+    if show_raw:
+        with st.expander("Payload → search_intent"):
+            st.json(payload_int)
+        with st.expander("RAW response ← search_intent"):
+            st.json(raw_int)
 
-# You can pass language_name OR language_code ("en")
-language_code = "en"        # keep it simple; set from a dropdown if you prefer
-df_intent, raw_int, sent_payload = get_search_intent(
-    kw_list,
-    loc_for_intent,
-    lang_name=language_name,
-    lang_code=language_code
-)
-    # Merge
+    # Debug: show any keywords lacking an intent row
+    got = set(df_intent["keyword"].dropna().astype(str))
+    sent = set(kw_list)
+    missing = sorted(list(sent - got))
+    if missing:
+        with st.expander(f"Debug: {len(missing)} keywords missing intent (click to view)"):
+            st.write(missing)
+
+    # Merge + group
     df = df_kw.merge(df_intent, on="keyword", how="left")
 
-    # Per-intent summary
-    by_intent = (df
-                 .groupby("intent", dropna=False)
-                 .agg(
-                     keywords=("keyword", "count"),
-                     total_volume=("search_volume", "sum"),
-                     avg_cpc_gbp=("cpc_gbp", safe_avg),
-                     avg_intent_prob=("intent_probability", safe_avg)
-                 )
-                 .reset_index()
-                 .rename(columns={"intent": "Intent"}))
+    def summarise(df_):
+        return (df_
+                .groupby("intent", dropna=False)
+                .agg(
+                    keywords=("keyword", "count"),
+                    total_volume=("search_volume", "sum"),
+                    avg_cpc_gbp=("cpc_gbp", safe_avg),
+                    avg_intent_prob=("intent_probability", safe_avg)
+                )
+                .reset_index()
+                .rename(columns={"intent":"Intent"}))
 
-    # Apply CTR/CVR & compute spend, clicks, conversions
+    by_intent = summarise(df)
     by_intent["CTR"] = by_intent["Intent"].map(ctrs).fillna(0.02)
     by_intent["CVR"] = by_intent["Intent"].map(cvrs).fillna(0.02)
     by_intent["Clicks"] = (by_intent["total_volume"] * by_intent["CTR"]).round(0)
@@ -279,7 +268,6 @@ df_intent, raw_int, sent_payload = get_search_intent(
     st.subheader("Grouped by intent")
     st.dataframe(by_intent.fillna("—"), use_container_width=True)
 
-    # Blended overview (all terms combined)
     st.subheader("Blended overview (all terms)")
     blended = pd.DataFrame({
         "keywords": [int(by_intent["keywords"].sum())],
@@ -293,44 +281,16 @@ df_intent, raw_int, sent_payload = get_search_intent(
     })
     st.dataframe(blended, use_container_width=True)
 
-    # Optional budget fit
-    if budget and budget > 0:
-        st.subheader("Budget fit (optional)")
-        needs = by_intent["Spend £"].replace(0, np.nan)
-        if needs.notna().any():
-            weights = needs / needs.sum()
-        else:
-            weights = pd.Series([1/len(by_intent)]*len(by_intent), index=by_intent.index)
-        alloc = (weights * budget).fillna(0)
-        feasible_clicks = np.where(by_intent["Avg CPC £"] > 0, alloc / by_intent["Avg CPC £"], 0)
-        feasible_convs = feasible_clicks * by_intent["CVR"]
-        budget_df = pd.DataFrame({
-            "Intent": by_intent["Intent"],
-            "Budget £": alloc.round(2),
-            "Avg CPC £": by_intent["Avg CPC £"].round(2),
-            "CTR": by_intent["CTR"],
-            "CVR": by_intent["CVR"],
-            "Clicks (budget)": np.round(feasible_clicks, 0).astype(int),
-            "Conversions (budget)": np.round(feasible_convs, 0).astype(int),
-        })
-        st.dataframe(budget_df, use_container_width=True)
-
     # Downloads
-    st.download_button("Download detailed rows (CSV)", df.to_csv(index=False).encode("utf-8"),
-                       file_name="labs_keywords_with_intent.csv", mime="text/csv")
-    st.download_button("Download intent summary (CSV)", by_intent.to_csv(index=False).encode("utf-8"),
-                       file_name="intent_summary.csv", mime="text/csv")
-    st.download_button("Download blended overview (CSV)", blended.to_csv(index=False).encode("utf-8"),
-                       file_name="blended_overview.csv", mime="text/csv")
+    st.download_button("Download detailed rows (CSV)",
+        df.to_csv(index=False).encode("utf-8"), "labs_keywords_with_intent.csv", "text/csv")
+    st.download_button("Download intent summary (CSV)",
+        by_intent.to_csv(index=False).encode("utf-8"), "intent_summary.csv", "text/csv")
+    st.download_button("Download blended overview (CSV)",
+        blended.to_csv(index=False).encode("utf-8"), "blended_overview.csv", "text/csv")
 
-    # Rough cost estimate (trial safety)
-    n_items = len(df_kw)
-    # Typical published micro-prices (subject to change) — suggestions + search_intent
-    EST = {
-        "suggest_task": 0.01,     # per request
-        "suggest_item": 0.0001,   # per keyword returned
-        "intent_task": 0.001,     # per request (cheaper than others)
-        "intent_item": 0.0001     # per keyword
-    }
-    approx_cost = EST["suggest_task"] + n_items * EST["suggest_item"] + EST["intent_task"] + n_items * EST["intent_item"]
-    st.caption(f"Approx. cost this run: ~${approx_cost:.3f} for {n_items} keywords (estimate only).")
+    # Cost estimate (very rough; just to reassure on trial usage)
+    n = len(df_kw)
+    EST = {"sug_task":0.01, "sug_item":0.0001, "intent_task":0.001, "intent_item":0.0001}
+    approx_cost = EST["sug_task"] + n*EST["sug_item"] + EST["intent_task"] + n*EST["intent_item"]
+    st.caption(f"Approximate API cost this run: ~${approx_cost:.3f} for {n} keywords (estimate only).")
