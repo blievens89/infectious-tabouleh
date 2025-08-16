@@ -177,15 +177,35 @@ def get_keyword_suggestions(seed: str, loc: int, lang: str, limit: int) -> pd.Da
     return df
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_search_intent(keywords: list[str], loc: int, lang: str) -> pd.DataFrame:
-    # Labs Search Intent (Live) supports up to 1000 keywords per call
-    payload = [{
-        "keywords": keywords[:1000],
-        "location_code": int(loc),
-        "language_name": lang
-    }]
+def get_search_intent(keywords: list[str], loc: int | None, lang_name: str | None, lang_code: str | None = None) -> tuple[pd.DataFrame, dict, dict]:
+    """
+    DataForSEO Labs · Search Intent (Live)
+    - Only requires keywords + (language_name or language_code)
+    - location_code is optional; omit when None
+    Returns: (df, raw_response, payload_used)
+    """
+    # Clean keywords
+    kws = sorted(list({(k or "").strip() for k in keywords if isinstance(k, str)}))
+    if not kws:
+        return pd.DataFrame(columns=["keyword","intent","intent_probability"]), {"note": "no keywords"}, {}
+
+    # Build payload with only required/valid fields
+    payload_item = {
+        "keywords": kws[:1000]
+    }
+    if lang_code:         # preferred if you have it (e.g., "en")
+        payload_item["language_code"] = lang_code
+    elif lang_name:       # fallback (e.g., "English")
+        payload_item["language_name"] = lang_name.strip()
+
+    if loc:               # include ONLY if provided
+        payload_item["location_code"] = int(loc)
+
+    payload = [payload_item]
+
     resp = labs_post("/google/search_intent/live", payload)
     items = extract_items(resp)
+
     rows = []
     for it in items:
         kw = it.get("keyword")
@@ -195,7 +215,8 @@ def get_search_intent(keywords: list[str], loc: int, lang: str) -> pd.DataFrame:
             "intent": si.get("main_intent"),
             "intent_probability": si.get("probability")
         })
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    return df, resp, payload_item
 
 # ----------------------------
 # Run
@@ -218,10 +239,20 @@ if run:
     st.dataframe(df_kw, use_container_width=True)
 
     # Intent classification
-    with st.spinner("Classifying search intent (Live)…"):
-        kw_list = df_kw["keyword"].dropna().astype(str).tolist()
-        df_intent = get_search_intent(kw_list, location_code, language_name)
+kw_list = df_kw["keyword"].dropna().astype(str).tolist()
 
+# Pass None for loc if you want to omit it
+use_loc_for_intent = False  # or drive this from a sidebar toggle
+loc_for_intent = location_code if use_loc_for_intent else None
+
+# You can pass language_name OR language_code ("en")
+language_code = "en"        # keep it simple; set from a dropdown if you prefer
+df_intent, raw_int, sent_payload = get_search_intent(
+    kw_list,
+    loc_for_intent,
+    lang_name=language_name,
+    lang_code=language_code
+)
     # Merge
     df = df_kw.merge(df_intent, on="keyword", how="left")
 
