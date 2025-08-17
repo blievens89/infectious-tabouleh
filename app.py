@@ -164,6 +164,11 @@ def get_keyword_suggestions(seed: str, lang_code: str, loc_name: str | None, lim
 
     df = pd.DataFrame(rows).dropna(subset=["keyword"]).drop_duplicates(subset=["keyword"]).reset_index(drop=True)
     df['search_volume'] = df['search_volume'].fillna(df['avg_monthly_searches'])
+    
+    # FIX: Standardise the keyword column to ensure successful merging later
+    if not df.empty:
+        df['keyword'] = df['keyword'].str.lower().str.strip()
+        
     return df, response, payload_item
 
 @st.cache_data(ttl=3600, show_spinner="Analysing search intent...")
@@ -192,6 +197,11 @@ def get_search_intent(keywords: list[str], lang_code: str) -> tuple[pd.DataFrame
             "intent_probability": intent_info.get("probability")
         })
     df = pd.DataFrame(rows)
+
+    # FIX: Standardise the keyword column to ensure successful merging
+    if not df.empty:
+        df['keyword'] = df['keyword'].str.lower().str.strip()
+
     return df, response, payload_item
 
 # --- Main Application Logic ---
@@ -226,6 +236,13 @@ if st.button("Fetch Ideas & Analyse Intent", type="primary"):
 
     # 3. Merge and process the data
     df_merged = pd.merge(df_kw, df_intent, on="keyword", how="left")
+
+    # NEW: Debug section to identify any keywords that failed to match
+    unmatched_keywords = df_merged[df_merged['intent'].isna()]['keyword'].tolist()
+    if unmatched_keywords:
+        with st.expander(f"Debug: {len(unmatched_keywords)} keywords failed to match with an intent"):
+            st.write(unmatched_keywords)
+
 
     # 4. Summarise by Intent
     summary = df_merged.groupby("intent").agg(
