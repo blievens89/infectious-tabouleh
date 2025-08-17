@@ -111,7 +111,8 @@ with st.sidebar:
     if use_location_for_suggestions:
         location_name = st.text_input("Location Name", value="United Kingdom")
 
-    limit = st.slider("Max Keyword Ideas", 5, 20, 20, step=5)
+    # UPDATED: Increased the slider limit for more flexibility
+    limit = st.slider("Max Keyword Ideas", 10, 300, 50, step=10)
     usd_to_gbp_rate = st.number_input("USD to GBP Exchange Rate", 0.1, 2.0, 0.79, 0.01)
 
     st.divider()
