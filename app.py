@@ -17,6 +17,11 @@ from Client.client import RestClient
 st.set_page_config(page_title="Labs Keyword Ideas + Intent (Live)", layout="wide")
 st.title("DataForSEO Labs — Keyword Ideas → Intent Planner")
 
+# --- Initialise Session State ---
+# This ensures the variables exist on the first run
+if 'results' not in st.session_state:
+    st.session_state.results = None
+
 # --- Password Gate ---
 # Ensures the application is not publicly accessible without a password.
 if "authed" not in st.session_state:
@@ -207,7 +212,20 @@ if st.button("Fetch Ideas & Analyse Intent", type="primary"):
 
     if df_merged.empty:
         st.warning("No keyword suggestions were returned. Please try a different seed keyword or adjust the settings.")
-        st.stop()
+        st.session_state.results = None # Clear previous results
+    else:
+        # Store the results in the session state
+        st.session_state.results = {
+            "df_merged": df_merged,
+            "raw_sug": raw_sug,
+            "raw_int": raw_int
+        }
+
+# --- Display Results (if they exist in session state) ---
+if st.session_state.results:
+    df_merged = st.session_state.results["df_merged"]
+    raw_sug = st.session_state.results["raw_sug"]
+    raw_int = st.session_state.results["raw_int"]
 
     df_merged["cpc_gbp"] = (pd.to_numeric(df_merged["cpc_usd"], errors="coerce") * usd_to_gbp_rate).round(2)
     st.subheader("Keyword Ideas & Metrics")
@@ -241,21 +259,17 @@ if st.button("Fetch Ideas & Analyse Intent", type="primary"):
         summary["Spend £"] = (summary["Clicks"] * summary["Avg CPC £"]).round(2)
         summary["Conversions"] = (summary["Clicks"] * summary["CVR"]).round(0)
         
-        # ADDED: CPA column with protection against division by zero
         summary["CPA £"] = (summary["Spend £"] / summary["Conversions"]).replace([np.inf, -np.inf], 0).round(2)
-
 
         st.subheader("Grouped by Search Intent")
         st.dataframe(summary.fillna("—"), use_container_width=True)
 
-        # --- UPDATED: Blended Overview with Weighted Calculations ---
         total_keywords = summary["keywords"].sum()
         total_volume = summary["total_volume"].sum()
         total_clicks = summary["Clicks"].sum()
         total_spend = summary["Spend £"].sum()
         total_conversions = summary["Conversions"].sum()
 
-        # Weighted calculations
         blended_cpc = total_spend / total_clicks if total_clicks > 0 else 0
         blended_ctr = total_clicks / total_volume if total_volume > 0 else 0
         blended_cvr = total_conversions / total_clicks if total_clicks > 0 else 0
@@ -279,12 +293,12 @@ if st.button("Fetch Ideas & Analyse Intent", type="primary"):
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.download_button("Download Detailed Data (CSV)", df_merged.to_csv(index=False).encode("utf-8"), "keyword_intent_details.csv", "text/csv")
+        st.download_button("Download Detailed Data (CSV)", df_merged.to_csv(index=False).encode("utf-8"), "keyword_intent_details.csv", "text/csv", key="d1")
     if not summary_df.empty:
         with col2:
-            st.download_button("Download Intent Summary (CSV)", summary.to_csv(index=False).encode("utf-8"), "intent_summary.csv", "text/csv")
+            st.download_button("Download Intent Summary (CSV)", summary.to_csv(index=False).encode("utf-8"), "intent_summary.csv", "text/csv", key="d2")
         with col3:
-            st.download_button("Download Blended Overview (CSV)", blended_overview.to_csv(index=False).encode("utf-8"), "blended_overview.csv", "text/csv")
+            st.download_button("Download Blended Overview (CSV)", blended_overview.to_csv(index=False).encode("utf-8"), "blended_overview.csv", "text/csv", key="d3")
 
     num_keywords = len(df_merged)
     cost_sug = 0.01 + num_keywords * 0.0001
