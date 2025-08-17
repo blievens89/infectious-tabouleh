@@ -53,16 +53,19 @@ except Exception as e:
 
 # --- Helper Functions ---
 
-def make_api_post_request(endpoint: str, payload: list[dict]) -> dict:
+def make_api_post_request(endpoint: str, payload: dict) -> dict:
     """
     Makes a POST request to a DataForSEO Labs endpoint and handles errors.
+    Note: The payload must be a dictionary as expected by the official RestClient.
     """
     try:
         response = client.post(f"{LABS_BASE_URL}{endpoint}", payload)
+        # A successful response should have a 20000 status_code.
         if response and response.get("status_code") == 20000:
             return response
         else:
             st.error(f"API Error on {endpoint}: {response.get('status_message', 'Unknown error')}")
+            st.json(response) # Show the full error response for debugging
             return {}
     except Exception as e:
         st.error(f"An exception occurred while calling the API endpoint {endpoint}: {e}")
@@ -73,6 +76,9 @@ def extract_items_from_response(response: dict) -> list[dict]:
     Safely extracts the 'items' list from a standard DataForSEO API response.
     """
     try:
+        # Check if the task was successful before trying to access results
+        if response.get("tasks_error", 1) > 0:
+            return []
         return response["tasks"][0]["result"][0]["items"]
     except (KeyError, IndexError, TypeError):
         return []
@@ -136,20 +142,20 @@ with st.sidebar:
 def get_keywords_and_intent(seed: str, lang_code: str, loc_name: str | None, limit: int) -> tuple[pd.DataFrame, dict, dict]:
     """
     A single function to fetch keyword suggestions and then immediately fetch their search intent.
-    This avoids caching conflicts between two separate functions.
+    This avoids caching conflicts and uses the correct payload structure.
     """
     # --- Part 1: Get Keyword Suggestions ---
     sug_payload_item = {
         "keyword": seed.strip(),
         "language_code": lang_code.strip(),
         "limit": limit,
-        "include_seed_keyword": False,
     }
     if loc_name:
         sug_payload_item["location_name"] = loc_name.strip()
 
-    sug_payload = [sug_payload_item]
-    sug_response = make_api_post_request("/google/keyword_suggestions/live", sug_payload)
+    # FIX: Use the dictionary structure required by the official RestClient
+    post_data_sug = {0: sug_payload_item}
+    sug_response = make_api_post_request("/google/keyword_suggestions/live", post_data_sug)
     sug_items = extract_items_from_response(sug_response)
 
     if not sug_items:
@@ -164,17 +170,13 @@ def get_keywords_and_intent(seed: str, lang_code: str, loc_name: str | None, lim
             "search_volume": info.get("search_volume"),
             "cpc_usd": cpc.get("cpc") if isinstance(cpc, dict) else cpc,
             "competition": info.get("competition"),
-            "avg_monthly_searches": calculate_monthly_average_searches(info.get("monthly_searches"))
         })
 
     df_kw = pd.DataFrame(rows).dropna(subset=["keyword"]).drop_duplicates(subset=["keyword"]).reset_index(drop=True)
-    df_kw['search_volume'] = df_kw['search_volume'].fillna(df_kw['avg_monthly_searches'])
-    
-    # Standardise the keyword column immediately
-    df_kw['keyword'] = df_kw['keyword'].str.lower().str.strip()
+    df_kw['keyword_clean'] = df_kw['keyword'].str.lower().str.strip()
     
     # --- Part 2: Get Search Intent ---
-    keyword_list = df_kw["keyword"].tolist()
+    keyword_list = df_kw["keyword_clean"].tolist()
     if not keyword_list:
         return df_kw, sug_response, {}
 
@@ -182,30 +184,29 @@ def get_keywords_and_intent(seed: str, lang_code: str, loc_name: str | None, lim
         "keywords": keyword_list,
         "language_code": lang_code.strip()
     }
-    intent_payload = [intent_payload_item]
-    intent_response = make_api_post_request("/google/search_intent/live", intent_payload)
+    # FIX: Use the dictionary structure required by the official RestClient
+    post_data_intent = {0: intent_payload_item}
+    intent_response = make_api_post_request("/google/search_intent/live", post_data_intent)
     intent_items = extract_items_from_response(intent_response)
 
     intent_rows = []
     for item in intent_items:
         intent_info = item.get("search_intent_info", {})
         intent_rows.append({
-            "keyword": item.get("keyword"),
+            "keyword_clean": (item.get("keyword") or "").lower().strip(),
             "intent": intent_info.get("main_intent"),
             "intent_probability": intent_info.get("probability")
         })
     df_intent = pd.DataFrame(intent_rows)
 
     if not df_intent.empty:
-        df_intent['keyword'] = df_intent['keyword'].str.lower().str.strip()
         # --- Part 3: Merge the data ---
-        df_merged = pd.merge(df_kw, df_intent, on="keyword", how="left")
-        return df_merged, sug_response, intent_response
+        df_merged = pd.merge(df_kw, df_intent, on="keyword_clean", how="left")
+        return df_merged.drop(columns=['keyword_clean']), sug_response, intent_response
     else:
-        # If intent call fails, return suggestions df with empty intent columns
         df_kw['intent'] = None
         df_kw['intent_probability'] = None
-        return df_kw, sug_response, intent_response
+        return df_kw.drop(columns=['keyword_clean']), sug_response, intent_response
 
 
 # --- Main Application Logic ---
@@ -213,7 +214,6 @@ def get_keywords_and_intent(seed: str, lang_code: str, loc_name: str | None, lim
 if st.button("Fetch Ideas & Analyse Intent", type="primary"):
     loc_for_sug = location_name if use_location_for_suggestions else None
     
-    # Call the single, combined function
     df_merged, raw_sug, raw_int = get_keywords_and_intent(seed_keyword, language_code, loc_for_sug, limit)
 
     if df_merged.empty:
@@ -224,7 +224,6 @@ if st.button("Fetch Ideas & Analyse Intent", type="primary"):
     st.subheader("Keyword Ideas & Metrics")
     st.dataframe(df_merged[['keyword', 'search_volume', 'cpc_gbp', 'competition', 'intent']], use_container_width=True)
 
-
     if show_raw_data:
         with st.expander("Debug: Raw API Data"):
             st.write("Keyword Suggestions Response:")
@@ -232,16 +231,13 @@ if st.button("Fetch Ideas & Analyse Intent", type="primary"):
             st.write("Search Intent Response:")
             st.json(raw_int)
 
-    # Check for any keywords that failed to match
     unmatched_keywords = df_merged[df_merged['intent'].isna()]['keyword'].tolist()
     if unmatched_keywords:
         with st.expander(f"Debug: {len(unmatched_keywords)} keywords could not be assigned an intent"):
             st.write(unmatched_keywords)
 
-    # Filter out rows where intent is missing for accurate summary
     summary_df = df_merged.dropna(subset=['intent'])
 
-    # Summarise by Intent
     if not summary_df.empty:
         summary = summary_df.groupby("intent").agg(
             keywords=("keyword", "count"),
@@ -260,7 +256,6 @@ if st.button("Fetch Ideas & Analyse Intent", type="primary"):
         st.subheader("Grouped by Search Intent")
         st.dataframe(summary.fillna("—"), use_container_width=True)
 
-        # Blended Overview
         blended_overview = pd.DataFrame({
             "Total Keywords": [int(summary["keywords"].sum())],
             "Total Volume": [int(summary["total_volume"].sum())],
@@ -276,33 +271,15 @@ if st.button("Fetch Ideas & Analyse Intent", type="primary"):
     else:
         st.warning("Could not generate intent summary as no intent data was returned.")
 
-
-    # Download Buttons
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.download_button(
-            "Download Detailed Data (CSV)",
-            df_merged.to_csv(index=False).encode("utf-8"),
-            "keyword_intent_details.csv",
-            "text/csv"
-        )
+        st.download_button("Download Detailed Data (CSV)", df_merged.to_csv(index=False).encode("utf-8"), "keyword_intent_details.csv", "text/csv")
     if not summary_df.empty:
         with col2:
-            st.download_button(
-                "Download Intent Summary (CSV)",
-                summary.to_csv(index=False).encode("utf-8"),
-                "intent_summary.csv",
-                "text/csv"
-            )
+            st.download_button("Download Intent Summary (CSV)", summary.to_csv(index=False).encode("utf-8"), "intent_summary.csv", "text/csv")
         with col3:
-            st.download_button(
-                "Download Blended Overview (CSV)",
-                blended_overview.to_csv(index=False).encode("utf-8"),
-                "blended_overview.csv",
-                "text/csv"
-            )
+            st.download_button("Download Blended Overview (CSV)", blended_overview.to_csv(index=False).encode("utf-8"), "blended_overview.csv", "text/csv")
 
-    # Cost Estimation
     num_keywords = len(df_merged)
     cost_sug = 0.01 + num_keywords * 0.0001
     cost_int = 0.001 + num_keywords * 0.0001
