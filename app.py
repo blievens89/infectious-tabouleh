@@ -28,7 +28,7 @@ if not st.session_state.authed:
         # Compare the input with the secret stored in Streamlit Cloud.
         if password_input == st.secrets.get("APP_PASSWORD"):
             st.session_state.authed = True
-            st.experimental_rerun() # Rerun the script to show the main app
+            st.rerun() # Rerun the script to show the main app
         else:
             st.error("The password you entered is incorrect.")
     st.stop() # Stop execution until authenticated
