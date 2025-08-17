@@ -17,7 +17,14 @@ class RestClient:
                 ("%s:%s" % (self.username, self.password)).encode("ascii")
                 ).decode("ascii")
             headers = {'Authorization' : 'Basic %s' %  base64_bytes, 'Content-Encoding' : 'gzip'}
-            connection.request(method, path, headers=headers, body=data)
+            
+            # The official client expects a dictionary, which it converts to a JSON array string
+            if data:
+                data_str = dumps(list(data.values()))
+            else:
+                data_str = None
+
+            connection.request(method, path, headers=headers, body=data_str)
             response = connection.getresponse()
             return loads(response.read().decode())
         finally:
@@ -27,8 +34,4 @@ class RestClient:
         return self.request(path, 'GET')
 
     def post(self, path, data):
-        if isinstance(data, str):
-            data_str = data
-        else:
-            data_str = dumps(data)
-        return self.request(path, 'POST', data_str)
+        return self.request(path, 'POST', data)
