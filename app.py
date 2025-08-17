@@ -112,8 +112,9 @@ with st.sidebar:
     st.divider()
     st.caption("CTR/CVR Assumptions by Intent")
     intents = ["informational", "navigational", "commercial", "transactional"]
-    ctr_defaults = {"informational": 0.02, "navigational": 0.04, "commercial": 0.05, "transactional": 0.06}
-    cvr_defaults = {"informational": 0.01, "navigational": 0.02, "commercial": 0.03, "transactional": 0.08}
+    # UPDATED: New default values as per user request
+    ctr_defaults = {"informational": 0.03, "navigational": 0.03, "commercial": 0.04, "transactional": 0.04}
+    cvr_defaults = {"informational": 0.015, "navigational": 0.015, "commercial": 0.03, "transactional": 0.03}
     ctrs, cvrs = {}, {}
     for intent in intents:
         col1, col2 = st.columns(2)
@@ -179,9 +180,6 @@ def get_keywords_and_intent(seed: str, lang_code: str, loc_name: str | None, lim
 
     intent_rows = []
     for item in intent_items:
-        # FIX: Use the CORRECT field names from the documentation
-        # 'keyword_intent' is the main object
-        # 'label' is the name of the intent
         intent_info = item.get("keyword_intent", {})
         intent_rows.append({
             "keyword_clean": (item.get("keyword") or "").lower().strip(),
@@ -234,7 +232,6 @@ if st.button("Fetch Ideas & Analyse Intent", type="primary"):
             keywords=("keyword", "count"),
             total_volume=("search_volume", "sum"),
             avg_cpc_gbp=("cpc_gbp", safe_average),
-            avg_intent_prob=("intent_probability", safe_average)
         ).reset_index().rename(columns={"intent": "Intent"})
 
         summary["CTR"] = summary["Intent"].map(ctrs)
@@ -243,21 +240,39 @@ if st.button("Fetch Ideas & Analyse Intent", type="primary"):
         summary["Avg CPC £"] = summary["avg_cpc_gbp"].round(2)
         summary["Spend £"] = (summary["Clicks"] * summary["Avg CPC £"]).round(2)
         summary["Conversions"] = (summary["Clicks"] * summary["CVR"]).round(0)
+        
+        # ADDED: CPA column with protection against division by zero
+        summary["CPA £"] = (summary["Spend £"] / summary["Conversions"]).replace([np.inf, -np.inf], 0).round(2)
+
 
         st.subheader("Grouped by Search Intent")
         st.dataframe(summary.fillna("—"), use_container_width=True)
 
+        # --- UPDATED: Blended Overview with Weighted Calculations ---
+        total_keywords = summary["keywords"].sum()
+        total_volume = summary["total_volume"].sum()
+        total_clicks = summary["Clicks"].sum()
+        total_spend = summary["Spend £"].sum()
+        total_conversions = summary["Conversions"].sum()
+
+        # Weighted calculations
+        blended_cpc = total_spend / total_clicks if total_clicks > 0 else 0
+        blended_ctr = total_clicks / total_volume if total_volume > 0 else 0
+        blended_cvr = total_conversions / total_clicks if total_clicks > 0 else 0
+        blended_cpa = total_spend / total_conversions if total_conversions > 0 else 0
+        
         blended_overview = pd.DataFrame({
-            "Total Keywords": [int(summary["keywords"].sum())],
-            "Total Volume": [int(summary["total_volume"].sum())],
-            "Blended Avg CPC £": [round(summary["avg_cpc_gbp"].mean(), 2) if not summary["avg_cpc_gbp"].isnull().all() else 0],
-            "Blended CTR": [round(summary["CTR"].mean(), 3)],
-            "Total Clicks": [int(summary["Clicks"].sum())],
-            "Blended CVR": [round(summary["CVR"].mean(), 3)],
-            "Total Conversions": [int(summary["Conversions"].sum())],
-            "Total Spend £": [round(summary["Spend £"].sum(), 2)]
+            "Total Keywords": [int(total_keywords)],
+            "Total Volume": [int(total_volume)],
+            "Weighted Avg CPC £": [round(blended_cpc, 2)],
+            "Weighted CTR": [round(blended_ctr, 3)],
+            "Total Clicks": [int(total_clicks)],
+            "Weighted CVR": [round(blended_cvr, 3)],
+            "Total Conversions": [int(total_conversions)],
+            "Total Spend £": [round(total_spend, 2)],
+            "Blended CPA £": [round(blended_cpa, 2)]
         })
-        st.subheader("Blended Overview (All Keywords)")
+        st.subheader("Blended Overview (Weighted)")
         st.dataframe(blended_overview, use_container_width=True)
     else:
         st.warning("Could not generate intent summary as no intent data was returned.")
