@@ -78,21 +78,11 @@ def extract_items_from_response(response: dict) -> list[dict]:
     try:
         # Check if the task was successful before trying to access results
         if response.get("tasks_error", 1) > 0:
+            st.warning("The API task returned an error. See raw response for details.")
             return []
         return response["tasks"][0]["result"][0]["items"]
     except (KeyError, IndexError, TypeError):
         return []
-
-def calculate_monthly_average_searches(monthly_searches: list[dict]) -> float:
-    """
-    Calculates the average search volume from a list of monthly search data.
-    """
-    if not monthly_searches:
-        return np.nan
-    volumes = [
-        m.get("search_volume") for m in monthly_searches if isinstance(m, dict) and "search_volume" in m
-    ]
-    return np.mean(volumes) if volumes else np.nan
 
 def safe_average(series: pd.Series) -> float:
     """
@@ -153,7 +143,6 @@ def get_keywords_and_intent(seed: str, lang_code: str, loc_name: str | None, lim
     if loc_name:
         sug_payload_item["location_name"] = loc_name.strip()
 
-    # FIX: Use the dictionary structure required by the official RestClient
     post_data_sug = {0: sug_payload_item}
     sug_response = make_api_post_request("/google/keyword_suggestions/live", post_data_sug)
     sug_items = extract_items_from_response(sug_response)
@@ -184,17 +173,19 @@ def get_keywords_and_intent(seed: str, lang_code: str, loc_name: str | None, lim
         "keywords": keyword_list,
         "language_code": lang_code.strip()
     }
-    # FIX: Use the dictionary structure required by the official RestClient
     post_data_intent = {0: intent_payload_item}
     intent_response = make_api_post_request("/google/search_intent/live", post_data_intent)
     intent_items = extract_items_from_response(intent_response)
 
     intent_rows = []
     for item in intent_items:
-        intent_info = item.get("search_intent_info", {})
+        # FIX: Use the CORRECT field names from the documentation
+        # 'keyword_intent' is the main object
+        # 'label' is the name of the intent
+        intent_info = item.get("keyword_intent", {})
         intent_rows.append({
             "keyword_clean": (item.get("keyword") or "").lower().strip(),
-            "intent": intent_info.get("main_intent"),
+            "intent": intent_info.get("label"),
             "intent_probability": intent_info.get("probability")
         })
     df_intent = pd.DataFrame(intent_rows)
