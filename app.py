@@ -130,28 +130,33 @@ with st.sidebar:
     show_raw_data = st.toggle("Show Raw API Data (for debugging)", value=False)
 
 
-# --- Cached API Functions ---
+# --- REFACTORED API FUNCTION ---
 
-@st.cache_data(ttl=3600, show_spinner="Fetching keyword suggestions...")
-def get_keyword_suggestions(seed: str, lang_code: str, loc_name: str | None, limit: int) -> tuple[pd.DataFrame, dict, dict]:
+@st.cache_data(ttl=3600, show_spinner="Fetching keywords and analysing intent...")
+def get_keywords_and_intent(seed: str, lang_code: str, loc_name: str | None, limit: int) -> tuple[pd.DataFrame, dict, dict]:
     """
-    Fetches keyword suggestions from the DataForSEO Labs API.
+    A single function to fetch keyword suggestions and then immediately fetch their search intent.
+    This avoids caching conflicts between two separate functions.
     """
-    payload_item = {
+    # --- Part 1: Get Keyword Suggestions ---
+    sug_payload_item = {
         "keyword": seed.strip(),
         "language_code": lang_code.strip(),
         "limit": limit,
         "include_seed_keyword": False,
     }
     if loc_name:
-        payload_item["location_name"] = loc_name.strip()
+        sug_payload_item["location_name"] = loc_name.strip()
 
-    payload = [payload_item]
-    response = make_api_post_request("/google/keyword_suggestions/live", payload)
-    items = extract_items_from_response(response)
+    sug_payload = [sug_payload_item]
+    sug_response = make_api_post_request("/google/keyword_suggestions/live", sug_payload)
+    sug_items = extract_items_from_response(sug_response)
+
+    if not sug_items:
+        return pd.DataFrame(), sug_response, {}
 
     rows = []
-    for item in items:
+    for item in sug_items:
         info = item.get("keyword_info", {})
         cpc = info.get("cpc")
         rows.append({
@@ -162,121 +167,117 @@ def get_keyword_suggestions(seed: str, lang_code: str, loc_name: str | None, lim
             "avg_monthly_searches": calculate_monthly_average_searches(info.get("monthly_searches"))
         })
 
-    df = pd.DataFrame(rows).dropna(subset=["keyword"]).drop_duplicates(subset=["keyword"]).reset_index(drop=True)
-    df['search_volume'] = df['search_volume'].fillna(df['avg_monthly_searches'])
+    df_kw = pd.DataFrame(rows).dropna(subset=["keyword"]).drop_duplicates(subset=["keyword"]).reset_index(drop=True)
+    df_kw['search_volume'] = df_kw['search_volume'].fillna(df_kw['avg_monthly_searches'])
     
-    # FIX: Standardise the keyword column to ensure successful merging later
-    if not df.empty:
-        df['keyword'] = df['keyword'].str.lower().str.strip()
-        
-    return df, response, payload_item
+    # Standardise the keyword column immediately
+    df_kw['keyword'] = df_kw['keyword'].str.lower().str.strip()
+    
+    # --- Part 2: Get Search Intent ---
+    keyword_list = df_kw["keyword"].tolist()
+    if not keyword_list:
+        return df_kw, sug_response, {}
 
-@st.cache_data(ttl=3600, show_spinner="Analysing search intent...")
-def get_search_intent(keywords: list[str], lang_code: str) -> tuple[pd.DataFrame, dict, dict]:
-    """
-    Gets search intent for a list of keywords.
-    IMPORTANT: This API endpoint does not support location parameters.
-    """
-    if not keywords:
-        return pd.DataFrame(columns=["keyword", "intent", "intent_probability"]), {}, {}
-
-    payload_item = {
-        "keywords": list(set(keywords)), # Use set to ensure unique keywords
+    intent_payload_item = {
+        "keywords": keyword_list,
         "language_code": lang_code.strip()
     }
-    payload = [payload_item]
-    response = make_api_post_request("/google/search_intent/live", payload)
-    items = extract_items_from_response(response)
+    intent_payload = [intent_payload_item]
+    intent_response = make_api_post_request("/google/search_intent/live", intent_payload)
+    intent_items = extract_items_from_response(intent_response)
 
-    rows = []
-    for item in items:
+    intent_rows = []
+    for item in intent_items:
         intent_info = item.get("search_intent_info", {})
-        rows.append({
+        intent_rows.append({
             "keyword": item.get("keyword"),
             "intent": intent_info.get("main_intent"),
             "intent_probability": intent_info.get("probability")
         })
-    df = pd.DataFrame(rows)
+    df_intent = pd.DataFrame(intent_rows)
 
-    # FIX: Standardise the keyword column to ensure successful merging
-    if not df.empty:
-        df['keyword'] = df['keyword'].str.lower().str.strip()
+    if not df_intent.empty:
+        df_intent['keyword'] = df_intent['keyword'].str.lower().str.strip()
+        # --- Part 3: Merge the data ---
+        df_merged = pd.merge(df_kw, df_intent, on="keyword", how="left")
+        return df_merged, sug_response, intent_response
+    else:
+        # If intent call fails, return suggestions df with empty intent columns
+        df_kw['intent'] = None
+        df_kw['intent_probability'] = None
+        return df_kw, sug_response, intent_response
 
-    return df, response, payload_item
 
 # --- Main Application Logic ---
 
 if st.button("Fetch Ideas & Analyse Intent", type="primary"):
-    # 1. Get Keyword Suggestions
     loc_for_sug = location_name if use_location_for_suggestions else None
-    df_kw, raw_sug, payload_sug = get_keyword_suggestions(seed_keyword, language_code, loc_for_sug, limit)
+    
+    # Call the single, combined function
+    df_merged, raw_sug, raw_int = get_keywords_and_intent(seed_keyword, language_code, loc_for_sug, limit)
 
-    if df_kw.empty:
+    if df_merged.empty:
         st.warning("No keyword suggestions were returned. Please try a different seed keyword or adjust the settings.")
         st.stop()
 
-    df_kw["cpc_gbp"] = (pd.to_numeric(df_kw["cpc_usd"], errors="coerce") * usd_to_gbp_rate).round(2)
+    df_merged["cpc_gbp"] = (pd.to_numeric(df_merged["cpc_usd"], errors="coerce") * usd_to_gbp_rate).round(2)
     st.subheader("Keyword Ideas & Metrics")
-    st.dataframe(df_kw[['keyword', 'search_volume', 'cpc_gbp', 'competition']], use_container_width=True)
+    st.dataframe(df_merged[['keyword', 'search_volume', 'cpc_gbp', 'competition', 'intent']], use_container_width=True)
 
-    # 2. Get Search Intent for the suggested keywords
-    keyword_list = df_kw["keyword"].dropna().tolist()
-    df_intent, raw_int, payload_int = get_search_intent(keyword_list, language_code)
 
     if show_raw_data:
         with st.expander("Debug: Raw API Data"):
-            st.write("Keyword Suggestions Payload:")
-            st.json(payload_sug)
             st.write("Keyword Suggestions Response:")
             st.json(raw_sug)
-            st.write("Search Intent Payload:")
-            st.json(payload_int)
             st.write("Search Intent Response:")
             st.json(raw_int)
 
-    # 3. Merge and process the data
-    df_merged = pd.merge(df_kw, df_intent, on="keyword", how="left")
-
-    # NEW: Debug section to identify any keywords that failed to match
+    # Check for any keywords that failed to match
     unmatched_keywords = df_merged[df_merged['intent'].isna()]['keyword'].tolist()
     if unmatched_keywords:
-        with st.expander(f"Debug: {len(unmatched_keywords)} keywords failed to match with an intent"):
+        with st.expander(f"Debug: {len(unmatched_keywords)} keywords could not be assigned an intent"):
             st.write(unmatched_keywords)
 
+    # Filter out rows where intent is missing for accurate summary
+    summary_df = df_merged.dropna(subset=['intent'])
 
-    # 4. Summarise by Intent
-    summary = df_merged.groupby("intent").agg(
-        keywords=("keyword", "count"),
-        total_volume=("search_volume", "sum"),
-        avg_cpc_gbp=("cpc_gbp", safe_average),
-        avg_intent_prob=("intent_probability", safe_average)
-    ).reset_index().rename(columns={"intent": "Intent"})
+    # Summarise by Intent
+    if not summary_df.empty:
+        summary = summary_df.groupby("intent").agg(
+            keywords=("keyword", "count"),
+            total_volume=("search_volume", "sum"),
+            avg_cpc_gbp=("cpc_gbp", safe_average),
+            avg_intent_prob=("intent_probability", safe_average)
+        ).reset_index().rename(columns={"intent": "Intent"})
 
-    summary["CTR"] = summary["Intent"].map(ctrs)
-    summary["CVR"] = summary["Intent"].map(cvrs)
-    summary["Clicks"] = (summary["total_volume"] * summary["CTR"]).round(0)
-    summary["Avg CPC £"] = summary["avg_cpc_gbp"].round(2)
-    summary["Spend £"] = (summary["Clicks"] * summary["Avg CPC £"]).round(2)
-    summary["Conversions"] = (summary["Clicks"] * summary["CVR"]).round(0)
+        summary["CTR"] = summary["Intent"].map(ctrs)
+        summary["CVR"] = summary["Intent"].map(cvrs)
+        summary["Clicks"] = (summary["total_volume"] * summary["CTR"]).round(0)
+        summary["Avg CPC £"] = summary["avg_cpc_gbp"].round(2)
+        summary["Spend £"] = (summary["Clicks"] * summary["Avg CPC £"]).round(2)
+        summary["Conversions"] = (summary["Clicks"] * summary["CVR"]).round(0)
 
-    st.subheader("Grouped by Search Intent")
-    st.dataframe(summary.fillna("—"), use_container_width=True)
+        st.subheader("Grouped by Search Intent")
+        st.dataframe(summary.fillna("—"), use_container_width=True)
 
-    # 5. Blended Overview
-    blended_overview = pd.DataFrame({
-        "Total Keywords": [int(summary["keywords"].sum())],
-        "Total Volume": [int(summary["total_volume"].sum())],
-        "Blended Avg CPC £": [round(summary["avg_cpc_gbp"].mean(), 2)],
-        "Blended CTR": [round(summary["CTR"].mean(), 3)],
-        "Total Clicks": [int(summary["Clicks"].sum())],
-        "Blended CVR": [round(summary["CVR"].mean(), 3)],
-        "Total Conversions": [int(summary["Conversions"].sum())],
-        "Total Spend £": [round(summary["Spend £"].sum(), 2)]
-    })
-    st.subheader("Blended Overview (All Keywords)")
-    st.dataframe(blended_overview, use_container_width=True)
+        # Blended Overview
+        blended_overview = pd.DataFrame({
+            "Total Keywords": [int(summary["keywords"].sum())],
+            "Total Volume": [int(summary["total_volume"].sum())],
+            "Blended Avg CPC £": [round(summary["avg_cpc_gbp"].mean(), 2) if not summary["avg_cpc_gbp"].isnull().all() else 0],
+            "Blended CTR": [round(summary["CTR"].mean(), 3)],
+            "Total Clicks": [int(summary["Clicks"].sum())],
+            "Blended CVR": [round(summary["CVR"].mean(), 3)],
+            "Total Conversions": [int(summary["Conversions"].sum())],
+            "Total Spend £": [round(summary["Spend £"].sum(), 2)]
+        })
+        st.subheader("Blended Overview (All Keywords)")
+        st.dataframe(blended_overview, use_container_width=True)
+    else:
+        st.warning("Could not generate intent summary as no intent data was returned.")
 
-    # 6. Download Buttons
+
+    # Download Buttons
     col1, col2, col3 = st.columns(3)
     with col1:
         st.download_button(
@@ -285,23 +286,24 @@ if st.button("Fetch Ideas & Analyse Intent", type="primary"):
             "keyword_intent_details.csv",
             "text/csv"
         )
-    with col2:
-        st.download_button(
-            "Download Intent Summary (CSV)",
-            summary.to_csv(index=False).encode("utf-8"),
-            "intent_summary.csv",
-            "text/csv"
-        )
-    with col3:
-        st.download_button(
-            "Download Blended Overview (CSV)",
-            blended_overview.to_csv(index=False).encode("utf-8"),
-            "blended_overview.csv",
-            "text/csv"
-        )
+    if not summary_df.empty:
+        with col2:
+            st.download_button(
+                "Download Intent Summary (CSV)",
+                summary.to_csv(index=False).encode("utf-8"),
+                "intent_summary.csv",
+                "text/csv"
+            )
+        with col3:
+            st.download_button(
+                "Download Blended Overview (CSV)",
+                blended_overview.to_csv(index=False).encode("utf-8"),
+                "blended_overview.csv",
+                "text/csv"
+            )
 
-    # 7. Cost Estimation
-    num_keywords = len(df_kw)
+    # Cost Estimation
+    num_keywords = len(df_merged)
     cost_sug = 0.01 + num_keywords * 0.0001
     cost_int = 0.001 + num_keywords * 0.0001
     approx_cost = cost_sug + cost_int
